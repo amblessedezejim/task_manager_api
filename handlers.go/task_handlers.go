@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -110,7 +111,7 @@ func DeleteTask(ctx *gin.Context) {
 
 	for i, task := range models.Tasks {
 		if task.ID == id {
-			models.Tasks = append(models.Tasks[:1], models.Tasks[i+1:]...)
+			models.Tasks = slices.Delete(models.Tasks, i, i+1)
 
 			ctx.JSON(http.StatusOK, models.TaskResponse{
 				Status:  "success",
