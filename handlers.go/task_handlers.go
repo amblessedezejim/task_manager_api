@@ -2,77 +2,75 @@ package handlers
 
 import (
 	"database/sql"
-	"fmt"
-	"log"
 	"net/http"
 	"strconv"
 
-	"github.com/amblessedezejim/task_manager_api/config"
+	"github.com/amblessedezejim/task_manager_api/database"
 	"github.com/amblessedezejim/task_manager_api/models"
 	"github.com/gin-gonic/gin"
+	"github.com/go-playground/validator/v10"
 )
 
+type TaskHandler struct {
+	repo     *database.TaskRepository
+	validate *validator.Validate
+}
+
+func NewTaskHandler(db *sql.DB) *TaskHandler {
+	return &TaskHandler{
+		repo:     database.NewTaskRepository(db),
+		validate: validator.New(),
+	}
+}
+
 // Get all tasks from database
-func GetTasks(ctx *gin.Context) {
-	rows, err := config.DB.Query("SELECT id, title, description, completed, created_at, updated_at FROM tasks ORDER BY created_at DESC")
-	if err != nil {
-		log.Println("Failed to get rows: ", err.Error())
-		ctx.JSON(http.StatusInternalServerError, models.TaskResponse{
-			Status:  "error",
-			Message: "Failed to fetch tasks from database",
-		})
+func (handler *TaskHandler) GetTasks(ctx *gin.Context) {
+	var filters models.TaskFilters
+
+	if err := ctx.ShouldBindQuery(&filters); err != nil {
+		handler.errorResponse(ctx, "Invalid query parameters", http.StatusBadRequest, err)
 		return
 	}
-	defer rows.Close()
-	var tasks []models.Task
-	for rows.Next() {
-		var task models.Task
-		err := rows.Scan(&task.ID, &task.Title, &task.Description, &task.Completed, &task.CreatedAt, &task.UpdatedAt)
-		if err != nil {
-			log.Println(err.Error())
-			ctx.JSON(http.StatusInternalServerError, models.TaskResponse{
-				Status:  "error",
-				Message: "Failed to scan task",
-			})
-			return
-		}
-		tasks = append(tasks, task)
+
+	if filters.Page < 1 {
+		filters.Page = 1
 	}
-	ctx.JSON(http.StatusOK, models.TaskResponse{
-		Status:  "success",
-		Message: "Fetched all tasks",
-		Data:    tasks,
+	if filters.Limit < 1 || filters.Limit > 100 {
+		filters.Limit = 10
+	}
+
+	tasks, pagination, err := handler.repo.GetTasks(filters)
+	if err != nil {
+		handler.errorResponse(ctx, "Failed to retreive tasks", http.StatusInternalServerError, err)
+		return
+	}
+
+	ctx.JSON(http.StatusOK, models.TaskListResponse{
+		Status:     "success",
+		Message:    "Retrieved all tasks",
+		Data:       tasks,
+		Pagination: pagination,
 	})
 }
 
 // Fetch task by ID
-func GetTaskById(ctx *gin.Context) {
+func (handler *TaskHandler) GetTaskById(ctx *gin.Context) {
 	// Grab task id from parameter
 	id, err := strconv.Atoi(ctx.Param("id"))
 	if err != nil {
-		ctx.JSON(http.StatusBadRequest, models.TaskResponse{
-			Status:  "error",
-			Message: "Invalid request ID",
-		})
+		handler.errorResponse(ctx, "Invalid task ID", http.StatusBadRequest, err)
 		return
 	}
 
 	// Try fetching task from database
-	var task models.Task
-	query := "SELECT id, title, description, completed, created_at, updated_at FROM tasks WHERE id = ?"
-	err = config.DB.QueryRow(query, id).Scan(&task.ID, &task.Title, &task.Completed, &task.CreatedAt, &task.UpdatedAt)
+	task, err := handler.repo.GetTaskById(id)
+
 	if err != nil {
-		var msg string
-		var code int
-		if err == sql.ErrNoRows {
-			msg = "Task not found"
-			code = http.StatusNotFound
-		} else {
-			msg = "Failed to fetch task" + err.Error()
-			code = http.StatusInternalServerError
-		}
-		serverError(ctx, msg, code)
-		return
+		handler.errorResponse(ctx, "Failed to retreive task", http.StatusInternalServerError, err)
+	}
+
+	if task == nil {
+		handler.errorResponse(ctx, "Task not found", http.StatusNotFound, nil)
 	}
 	ctx.JSON(http.StatusOK, models.TaskResponse{
 		Status:  "success",
@@ -82,84 +80,56 @@ func GetTaskById(ctx *gin.Context) {
 }
 
 // Create a new task
-func CreateTask(ctx *gin.Context) {
+func (handler *TaskHandler) CreateTask(ctx *gin.Context) {
 	var request models.CreateTaskRequest
 
 	if err := ctx.ShouldBindJSON(&request); err != nil {
-		ctx.JSON(http.StatusBadRequest, models.TaskResponse{
-			Status:  "error",
-			Message: "Invalid request",
-		})
+		handler.validationErrorResponse(ctx, err)
 		return
 	}
 
-	query := "INSERT INTO tasks (title description) VALUES (? ?)"
-	result, err := config.DB.Exec(query, request.Title, request.Description)
+	task, err := handler.repo.CreateTask(request)
+
 	if err != nil {
-		log.Println(err.Error())
-		serverError(ctx, fmt.Sprintf("Failed to create task: %s", err.Error()), http.StatusInternalServerError)
+		handler.errorResponse(ctx, "Failed to create task", http.StatusInternalServerError, err)
 		return
 	}
 
-	taskId, err := result.LastInsertId()
-	if err != nil {
-		serverError(ctx, fmt.Sprintf("Failed to get taskID %s", err.Error()), http.StatusInternalServerError)
-		return
-	}
-	var task models.Task
-	query = "SELECT id, title, description, completed, created_at, updated_at FROM tasks WHERE id = ?"
-	err = config.DB.QueryRow(query, taskId).Scan(&task.ID, &task.Title, &task.Completed, &task.CreatedAt, &task.UpdatedAt)
-	if err != nil {
-		serverError(ctx, fmt.Sprintf("Fetch to fetch created task: %s", err.Error()), http.StatusInternalServerError)
-		return
-	}
 	ctx.JSON(http.StatusCreated, models.TaskResponse{
 		Status:  "success",
-		Message: "Task created",
+		Message: "Task created successfully",
 		Data:    task,
 	})
 }
 
-func UpdateTask(ctx *gin.Context) {
+// Updates task in database
+func (handler *TaskHandler) UpdateTask(ctx *gin.Context) {
 	id, err := strconv.Atoi(ctx.Param("id"))
 	if err != nil {
-		ctx.JSON(http.StatusBadRequest, models.TaskResponse{
-			Status:  "error",
-			Message: "Invalid task ID",
-		})
+		handler.validationErrorResponse(ctx, err)
 		return
 	}
 
 	var request models.UpdateTaskRequest
 	if err := ctx.ShouldBindJSON(&request); err != nil {
-		serverError(ctx, "Invalid request data "+err.Error(), http.StatusBadRequest)
+		handler.validationErrorResponse(ctx, err)
 		return
 	}
 
-	// Update task in database
-	query := "UPDATE tasks SET title = ?, description = ? , completed = ? WHERE id = ?"
-	result, err := config.DB.Exec(query, request.Title, request.Description, request.Completed, id)
+	// TODO:
+	// if err := handler.validate.Struct(request); err != nil {
+	// 	handler.validationErrorResponse(ctx, err)
+	// 	return
+	// }
+
+	task, err := handler.repo.UpdateTask(id, request)
 	if err != nil {
-		serverError(ctx, "Failed to update task "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	affectedRows, err := result.RowsAffected()
-	if err != nil {
-		serverError(ctx, "Failed to get updated results "+err.Error(), http.StatusInternalServerError)
+		handler.errorResponse(ctx, "Failed to update task", http.StatusInternalServerError, err)
 		return
 	}
 
-	if affectedRows == 0 {
-		serverError(ctx, "Task not found", http.StatusNotFound)
-		return
-	}
-
-	var task models.Task
-	query = "SELECT id, title, description, completed, created_at, updated_at FROM tasks WHERE id = ?"
-	err = config.DB.QueryRow(query, id).Scan(&task.ID, &task.Title, &task.Completed, &task.CreatedAt, &task.UpdatedAt)
-	if err != nil {
-		serverError(ctx, "Failed to fetch updated task", http.StatusInternalServerError)
-		return
+	if task == nil {
+		handler.errorResponse(ctx, "Task not found", http.StatusNotFound, nil)
 	}
 
 	ctx.JSON(http.StatusOK, models.TaskResponse{
@@ -170,38 +140,22 @@ func UpdateTask(ctx *gin.Context) {
 }
 
 // Delete task from database
-func DeleteTask(ctx *gin.Context) {
+func (handler *TaskHandler) DeleteTask(ctx *gin.Context) {
 	id, err := strconv.Atoi(ctx.Param("id"))
 	if err != nil {
-		ctx.JSON(http.StatusBadRequest, models.TaskResponse{
-			Status:  "error",
-			Message: "Invalid task ID",
-		})
+		handler.errorResponse(ctx, "Invalid task ID", http.StatusBadRequest, err)
 		return
 	}
 
-	var request models.UpdateTaskRequest
-	if err := ctx.ShouldBindJSON(&request); err != nil {
-		serverError(ctx, "Invalid request data "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	// Delete task in database
-	query := "DELETE FROM tasks WHERE id = ?"
-	result, err := config.DB.Exec(query, id)
+	err = handler.repo.DeleteTask(id)
 	if err != nil {
-		serverError(ctx, "Failed to delete task "+err.Error(), http.StatusInternalServerError)
+		if err == sql.ErrNoRows {
+			handler.errorResponse(ctx, "Task not found", http.StatusNotFound, nil)
+			return
+		}
+		handler.errorResponse(ctx, "Failed to delete task", http.StatusInternalServerError, err)
 		return
-	}
-	affectedRows, err := result.RowsAffected()
-	if err != nil {
-		serverError(ctx, "Failed to get delete results "+err.Error(), http.StatusInternalServerError)
-		return
-	}
 
-	if affectedRows == 0 {
-		serverError(ctx, "Task not found", http.StatusNotFound)
-		return
 	}
 
 	ctx.JSON(http.StatusOK, models.TaskResponse{
@@ -210,10 +164,46 @@ func DeleteTask(ctx *gin.Context) {
 	})
 }
 
-func serverError(ctx *gin.Context, msg string, statusCode int) {
-	ctx.JSON(statusCode, models.TaskResponse{
+func (handler *TaskHandler) errorResponse(ctx *gin.Context, msg string, statusCode int, err error) {
+	response := models.ErrorResponse{
 		Status:  "error",
 		Message: msg,
-	})
+	}
 
+	if err != nil && gin.Mode() == gin.DebugMode {
+		response.Errors = map[string]any{
+			"detail": err.Error(),
+		}
+	}
+	ctx.JSON(statusCode, response)
+}
+
+func (handler *TaskHandler) validationErrorResponse(ctx *gin.Context, err error) {
+	errors := make(map[string]any)
+	if validationErrors, ok := err.(validator.ValidationErrors); ok {
+		for _, e := range validationErrors {
+			errors[e.Field()] = handler.getValidationMessage(e)
+		}
+	} else {
+		errors["general"] = err.Error()
+	}
+
+	ctx.JSON(http.StatusBadRequest, models.ErrorResponse{
+		Status:  "error",
+		Message: "Validation failed",
+		Errors:  errors,
+	})
+}
+
+func (handler *TaskHandler) getValidationMessage(e validator.FieldError) string {
+	switch e.Tag() {
+	case "required":
+		return "This field is required"
+	case "min":
+		return "This field must be as least " + e.Param() + " characters long"
+	case "max":
+		return "This field must be as most" + e.Param() + " characters long"
+	default:
+		return "This field is invalid"
+	}
 }
