@@ -18,7 +18,7 @@ func InitDB() {
 	}
 
 	DB.SetMaxIdleConns(25)
-	DB.SetMaxIdleConns(25)
+	DB.SetMaxOpenConns(25)
 
 	if err = DB.Ping(); err != nil {
 		log.Fatal("Failed to ping database ", err)

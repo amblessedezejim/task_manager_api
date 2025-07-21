@@ -64,7 +64,6 @@ func (handler *TaskHandler) GetTaskById(ctx *gin.Context) {
 
 	// Try fetching task from database
 	task, err := handler.repo.GetTaskById(id)
-
 	if err != nil {
 		handler.errorResponse(ctx, "Failed to retreive task", http.StatusInternalServerError, err)
 	}
@@ -89,7 +88,6 @@ func (handler *TaskHandler) CreateTask(ctx *gin.Context) {
 	}
 
 	task, err := handler.repo.CreateTask(request)
-
 	if err != nil {
 		handler.errorResponse(ctx, "Failed to create task", http.StatusInternalServerError, err)
 		return
@@ -200,9 +198,9 @@ func (handler *TaskHandler) getValidationMessage(e validator.FieldError) string 
 	case "required":
 		return "This field is required"
 	case "min":
-		return "This field must be as least " + e.Param() + " characters long"
+		return "This field must be at least " + e.Param() + " characters long"
 	case "max":
-		return "This field must be as most" + e.Param() + " characters long"
+		return "This field must be at most" + e.Param() + " characters long"
 	default:
 		return "This field is invalid"
 	}
